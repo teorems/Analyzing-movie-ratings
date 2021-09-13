@@ -1,0 +1,199 @@
+---
+title: "IMDB Movie Data"
+subtitle : "Retrieving data through web scraping in R"
+author: "Emmanuel Messori"
+date: "13/09/2021"
+output: pdf_document
+   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, tidy=TRUE)
+```
+
+## Objectives 
+
+We want to extract data from the top 50 movies on IMDB between September 2020 and 2021. There is a wealth of information we can pick from, but we will focus just on these fields:
+
+* title
+* description, 
+* genre, 
+* runtime
+* ratings
+
+Then, we want to check which relationship ratings have with the number of user votes. For instance, do the highest-rated movies also have the highest number of votes?
+
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(rvest)
+```
+
+To obtain the movies' list we made an [advanced search](https://www.imdb.com/search/title/) on the IMDB website :
+
+```{r}
+url <- "https://www.imdb.com/search/title/?title_type=feature&release_date=2020-09-01,2021-09-01"
+```
+
+We will now read the page content with the `read_html()` function of the `rvest` package:
+
+```{r}
+content <- read_html(url)
+```
+
+## Extracting the data
+
+Using this [Chrome extension](https://selectorgadget.com/) we can easily identify a functional CSS selector for the elements of interest.
+
+### Titles
+
+```{r}
+titles <- content %>% 
+  html_nodes(".lister-item-header a") %>% 
+  html_text()
+
+head(titles)
+```
+
+### Years
+
+```{r}
+#we're using parse number to just read the year and not the quarter info
+years <- content %>%
+  html_nodes(".text-muted.unbold") %>%
+  html_text() %>% readr::parse_number()
+
+unique(years)
+```
+
+### Movie's runtimes and genres
+
+```{r}
+#again parsing as a numeric vector
+runtimes <- content %>%
+  html_nodes(".runtime") %>%
+  html_text() %>% readr::parse_number()
+
+head(runtimes)
+
+genres <- content %>%
+  html_nodes(".genre") %>%
+  html_text() %>% stringr::str_squish()
+
+head(genres)
+```
+
+### User ratings and metascores
+
+The ratings bar is a bit more complex than the other components. It contains:
+* average user rating, repeated two times 
+* A 'rate this' element
+* The Metascore (missing for some movies)
+
+We will just focus on the avg. user rating and the Metascore. We could just scrape the rating and the metascore individually but in that way we won't preserve
+the relationship (e.g. we wouldn't were the NA metascores are located)
+
+```{r}
+ratings <- content %>%
+  html_nodes(".ratings-bar") %>%
+  html_text() %>%
+  stringr::str_squish() %>%
+  str_remove("Rate this 1 2 3 4 5 6 7 8 9 10") %>%
+  str_split(" X ")
+
+
+v_ratings <- 1:50
+v_meta <- 1:50
+
+for (i in seq_along(ratings)) 
+  {
+  v_ratings[i] <- str_remove_all(ratings[[i]][1], "\\d\\.?\\d?/\\d\\d") %>% readr::parse_number()
+  v_meta [i] <- readr::parse_number(ratings[[i]][2])
+  }
+
+  
+#7 movies have missing metascores
+
+```
+
+## Votes
+
+```{r}
+n_votes <- content %>% 
+  html_nodes(".sort-num_votes-visible span:nth-child(2)") %>% 
+  html_text() %>%
+  readr::parse_number()
+
+head(n_votes)
+```
+## Description
+
+```{r}
+desc <- content %>% 
+  html_nodes(".ratings-bar+ .text-muted") %>% 
+  html_text() %>%
+  stringr::str_squish()
+```
+
+
+
+
+## Final dataframe
+
+```{r}
+IMDBtop50 <- tibble(title = titles, year = years, genre = genres, runtime = runtimes, rating = v_ratings, metascore = v_meta, votes = n_votes, description = desc)
+
+slice_max(IMDBtop50[-8], n=10, order_by = votes) %>% knitr::kable(caption = "Top 10 movies by number of votes")
+```
+
+```{r}
+slice_max(IMDBtop50[-8], n = 10, order_by= rating) %>% knitr::kable(caption = "Top 10 movies by rating")
+```
+
+
+
+## Relation between number of votes and user rating
+
+```{r}
+IMDBtop50 %>% 
+  ggplot(aes(cut(rating, 5, dig.lab=1), votes)) +
+  geom_point() + 
+  geom_boxplot(alpha=0.5) +
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+  labs(title = "Number of votes per rating category", x="Rating", y="Number of votes")
+```
+It seems that the highest rated movies have also a notably higher number of votes. The two variables are slighty correlated:
+
+```{r}
+cor.test(~ rating + votes, data=IMDBtop50)
+```
+
+## Relationship between genre and rating
+
+
+Before studying this relationship, we have to divide the genre column which is multivalued into four columns. Then we will choose for our purposes the main genre.
+
+```{r}
+IMDBtop50_split <- separate(IMDBtop50, genre, into = c("g1","g2","g3","g4")) %>%
+  mutate(across(g1:g4, as.factor))
+
+ggplot(IMDBtop50_split, aes(fct_infreq(g1), fill=g1)) + 
+  geom_bar(show.legend = FALSE) + 
+  coord_flip() +
+  labs(title = "Genres of the Top 50 movies on IMDB",
+       caption = "Top 50 movies on IMDB between September 2020 and 2021", 
+       x ="Genre", 
+       y="Count")
+
+  ggplot(IMDBtop50_split, aes(reorder(g1,rating,median), rating)) +
+  geom_boxplot(aes(fill = g1), show.legend = FALSE) +
+  geom_point() +
+  coord_flip() +
+  labs(title="Ratings by genre", y="Rating", x="Genre", 
+       caption="Top 50 movies on IMDB between September 2020 and 2021")
+```
+The genres groups are quite imbalanced with a strong predominance of the action genre. To study furthermore this relationship we could use an ANOVA after collecting more data (at present there are not enough individuals in certain groups and the homogeneity of variance is not respected).
+
+
